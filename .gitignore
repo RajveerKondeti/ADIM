@@ -18,3 +18,7 @@ dist/
 # IDEs
 .vscode/
 .idea/
+
+qdrant_data/
+neo4j_data/
+*.db-journal

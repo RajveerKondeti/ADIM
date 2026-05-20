@@ -1,14 +1,84 @@
-import bcrypt
+"""
+security.py — everything authentication-related lives here.
+
+Consolidates what was previously split across:
+  - app/core/jwt.py        (token creation)
+  - app/core/security.py   (bcrypt hashing)
+  - app/core/roles.py      (role guard)
+
+Single responsibility: if it touches auth, it lives here.
+"""
+from datetime import datetime, timedelta
+from typing import Optional
+
+from fastapi import HTTPException, status
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+
+from app.core.config import settings
+
+# ── Password hashing ──────────────────────────────────────────────────────────
+# passlib manages the bcrypt context cleanly — no manual salt/encode gymnastics.
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 
 def hash_password(password: str) -> str:
-    # bcrypt expects bytes
-    pwd_bytes = password.encode('utf-8')
-    # Generate salt and hash
-    salt = bcrypt.gensalt()
-    hashed = bcrypt.hashpw(pwd_bytes, salt)
-    return hashed.decode('utf-8')
+    return pwd_context.hash(password)
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    password_bytes = plain_password.encode('utf-8')
-    hashed_bytes = hashed_password.encode('utf-8')
-    return bcrypt.checkpw(password_bytes, hashed_bytes)
+
+def verify_password(plain: str, hashed: str) -> bool:
+    return pwd_context.verify(plain, hashed)
+
+
+# ── JWT tokens ────────────────────────────────────────────────────────────────
+
+def create_access_token(
+    subject: str,
+    expires_delta: Optional[timedelta] = None,
+) -> str:
+    """
+    Args:
+        subject: Typically the user's email — becomes the "sub" claim.
+        expires_delta: Override default expiry for specific use cases.
+    """
+    expire = datetime.now(datetime.timezone.utc) + (
+        expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    payload = {"sub": subject, "exp": expire}
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def decode_access_token(token: str) -> str:
+    """
+    Decodes a JWT and returns the subject (email).
+    Raises HTTP 401 on any failure — invalid signature, expired, malformed.
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
+        subject: str = payload.get("sub")
+        if subject is None:
+            raise credentials_exception
+        return subject
+    except JWTError:
+        raise credentials_exception
+
+
+# ── Role guard ────────────────────────────────────────────────────────────────
+
+def require_role(user, required_role: str) -> None:
+    """
+    Raises 403 if the user doesn't have the required role.
+    Usage:  require_role(current_user, "admin")
+    """
+    if user.role != required_role:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"This action requires the '{required_role}' role.",
+        )
