@@ -22,3 +22,4 @@ dist/
 qdrant_data/
 neo4j_data/
 *.db-journal
+*.doc.txt
