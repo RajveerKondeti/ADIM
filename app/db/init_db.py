@@ -1,21 +1,37 @@
-import time
+"""
+init_db.py — runs once on application startup.
+
+Responsibility:
+  1. Verify the database is reachable.
+  2. Create all tables that don't yet exist (idempotent — safe to run repeatedly).
+
+NOT responsible for:
+  - Running Alembic migrations (that's alembic upgrade head, done in CI/CD)
+  - Seeding data (see scripts/seed.py)
+"""
+import logging
+
 from sqlalchemy.exc import OperationalError
-from app.db.session import engine
+
 from app.db.base import Base
+from app.db.session import engine
 
-from app.models import project
+# Import every model so Base.metadata knows about them before create_all().
+# If a model isn't imported here, its table won't be created.
+from app.models import project, user  # noqa: F401
 
-def init_db():
-    retries = 10
-    while retries > 0:
-        try:
-            print("Trying to connect to DB...")
-            Base.metadata.create_all(bind=engine)
-            print("DB Connected ✅")
-            return
-        except OperationalError:
-            print("DB not ready, retrying in 3 seconds...")
-            time.sleep(3)
-            retries -= 1
+logger = logging.getLogger(__name__)
 
-    raise Exception("Could not connect to DB after retries ❌")
+
+def init_db() -> None:
+    try:
+        # create_all is idempotent — skips tables that already exist.
+        Base.metadata.create_all(bind=engine)
+        logger.info("✅ Database tables verified/created.")
+    except OperationalError as e:
+        logger.error(
+            "❌ Cannot connect to the database. "
+            "Is Docker running? Is the DATABASE_URL in .env correct?\n"
+            f"Error: {e}"
+        )
+        raise
