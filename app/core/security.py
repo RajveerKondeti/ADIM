@@ -8,28 +8,24 @@ Consolidates what was previously split across:
 
 Single responsibility: if it touches auth, it lives here.
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import HTTPException, status
 from jose import JWTError, jwt
-from passlib.context import CryptContext
+import bcrypt
 
 from app.core.config import settings
 
 # ── Password hashing ──────────────────────────────────────────────────────────
 # passlib manages the bcrypt context cleanly — no manual salt/encode gymnastics.
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
-
-
+    return bcrypt.checkpw(plain.encode(), hashed.encode())
+    
 # ── JWT tokens ────────────────────────────────────────────────────────────────
 
 def create_access_token(
@@ -41,7 +37,7 @@ def create_access_token(
         subject: Typically the user's email — becomes the "sub" claim.
         expires_delta: Override default expiry for specific use cases.
     """
-    expire = datetime.now(datetime.timezone.utc) + (
+    expire = datetime.now(timezone.utc) + (
         expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     payload = {"sub": subject, "exp": expire}
@@ -62,7 +58,7 @@ def decode_access_token(token: str) -> str:
         payload = jwt.decode(
             token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
         )
-        subject: str = payload.get("sub")
+        subject: str | None = payload.get("sub")
         if subject is None:
             raise credentials_exception
         return subject
