@@ -13,10 +13,20 @@ The graph is intentionally simple right now. As ADIM grows, we add:
     - parallel nodes (risk agent + opportunity agent simultaneously)
     - human-in-the-loop pause nodes
     - memory retrieval node (long-term context from Qdrant)
+    
+
+Phase 2: RAG is live.
+  - When use_rag=True, the agent searches Qdrant for relevant context
+    before sending the prompt to Gemini.
+  - The LLM answers based on YOUR ingested documents, not just its
+    training data.
+ 
+Flow:
+  prompt → [embed prompt] → [search Qdrant top-3] → [inject context]
+         → [Gemini] → [knowledge graph stub] → response 
 """
 import logging
-import os
-from typing import Annotated, List, TypedDict
+from typing import Annotated, List, TypedDict, Optional
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -47,7 +57,7 @@ def _get_llm() -> ChatGoogleGenerativeAI:
     )
 
 
-# ── Nodes ─────────────────────────────────────────────────────────────────────
+# ── Nodes ────────────────────────────────────────────────────────────────────
 
 def call_model(state: AgentState) -> dict:
     """Node 1: Send the conversation to Gemini and get a response."""
@@ -60,6 +70,7 @@ def query_knowledge_graph(state: AgentState) -> dict:
     """
     Node 2: Placeholder for Neo4j knowledge graph lookup.
     Phase 2: extract entities from the LLM response and search Neo4j.
+    Phase 3: extract entities from response and write to Neo4j
     """
     logger.debug("Knowledge graph query — stub, returning no data.")
     return {"data_found": False}
@@ -76,50 +87,78 @@ _workflow.add_edge("knowledge_graph", END)
 
 agent_executor = _workflow.compile()
 
+# ── RAG context retrieval ─────────────────────────────────────────────────────
+ 
+def _get_rag_context(prompt: str, project_id: Optional[int] = None) -> str:
+    """
+    Embeds the user's prompt and searches Qdrant for the top-3 most
+    semantically similar chunks from ingested documents.
+ 
+    Returns the chunks as a formatted context block, or empty string
+    if nothing relevant is found.
+    """
+    try:
+        from app.services.ingestion import embed_query
+        from app.services.qdrant_service import search_similar
+ 
+        query_vector = embed_query(prompt)
+        chunks = search_similar(
+            query_vector=query_vector,
+            limit=3,
+            project_id=project_id,
+        )
+ 
+        if not chunks:
+            logger.debug("RAG search returned no results.")
+            return ""
+ 
+        context = "\n\n---\n\n".join(chunks)
+        logger.debug(f"RAG retrieved {len(chunks)} chunks.")
+        return context
+ 
+    except Exception as e:
+        # RAG failure should never crash the agent — fall back gracefully
+        logger.warning(f"RAG retrieval failed, continuing without context: {e}")
+        return ""
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def generate_response(prompt: str) -> str:
+def generate_response(prompt: str, use_rag: bool = False, project_id: Optional[int] = None) -> str:
     """
     Main entry point for the agent.
 
     Args:
-        prompt: The fully constructed prompt (context + user question).
-
+        prompt: Fully constructed prompt (system context + user question).
+        use_rag: If True, retrieves relevant document chunks from Qdrant
+                 and injects them into the prompt before calling the LLM.
+        project_id: Scopes RAG search to documents from a specific project.
+ 
     Returns:
         The agent's text response.
     """
+    final_prompt = prompt
+ 
+    if use_rag:
+        rag_context = _get_rag_context(prompt, project_id=project_id)
+        if rag_context:
+            final_prompt = (
+                f"{prompt}\n\n"
+                f"[RELEVANT KNOWLEDGE BASE CONTEXT]\n"
+                f"The following excerpts from ingested documents are relevant "
+                f"to the question above. Use them to ground your answer:\n\n"
+                f"{rag_context}"
+            )
+ 
     initial_state: AgentState = {
-        "messages": [HumanMessage(content=prompt)],
+        "messages": [HumanMessage(content=final_prompt)],
         "data_found": False,
     }
-
+ 
     try:
         result = agent_executor.invoke(initial_state)
-        last_message = result["messages"][-1]
-        return last_message.content
+        return result["messages"][-1].content
     except Exception as e:
         logger.error(f"Agent invocation failed: {e}")
-        return f"I encountered an error processing your request. Please try again."
+        return "I encountered an error processing your request. Please try again."
 
 
-# ── RAG (Phase 2 — disabled until embedding pipeline is wired) ────────────────
-# Uncomment and implement after:
-#   1. pip install sentence-transformers
-#   2. Create the Qdrant collection
-#   3. Build the ingestion pipeline
-
-# from qdrant_client import QdrantClient
-# from sentence_transformers import SentenceTransformer
-#
-# _qdrant = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
-# _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-#
-# def get_rag_context(query: str) -> str:
-#     query_vector = _embed_model.encode(query).tolist()
-#     results = _qdrant.search(
-#         collection_name=settings.QDRANT_COLLECTION,
-#         query_vector=query_vector,
-#         limit=3,
-#     )
-#     return "\n\n".join(r.payload["text"] for r in results)

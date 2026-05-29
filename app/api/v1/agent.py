@@ -10,6 +10,7 @@ from app.services.agent_engine import generate_response
 
 router = APIRouter()
 
+
 @router.post(
     "/chat",
     response_model=ChatResponse,
@@ -22,14 +23,17 @@ def chat(
 ) -> ChatResponse:
     context = (
         "You are ADIM (Autonomous Decision Intelligence Mesh), "
-        "an AI operations assistant. Be precise and actionable."
+        "an AI operations assistant. Be precise and actionable. "
+        "When knowledge base context is provided, prioritize it in your answer "
+        "and cite which part of the context informed your response."
     )
     project_context_used = False
+    project_id = body.project_id
 
-    if body.project_id:
+    if project_id:
         project = (
             db.query(Project)
-            .filter(Project.id == body.project_id, Project.user_id == current_user.id)
+            .filter(Project.id == project_id, Project.user_id == current_user.id)
             .first()
         )
         if project:
@@ -40,8 +44,13 @@ def chat(
             )
             project_context_used = True
 
-    full_prompt = f"{context}\n\n[USER]\n{body.prompt}"
-    response_text = generate_response(full_prompt)
+    full_prompt = f"{context}\n\n[USER QUESTION]\n{body.prompt}"
+
+    response_text = generate_response(
+        prompt=full_prompt,
+        use_rag=body.use_rag,
+        project_id=project_id if project_context_used else None,
+    )
 
     return ChatResponse(
         response=response_text,
